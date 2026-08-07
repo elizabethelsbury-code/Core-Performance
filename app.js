@@ -2226,12 +2226,14 @@ function renderLibraryTab(main){
   });
 }
 
-function renderExerciseLibrary(main, dayKey){
+function renderExerciseLibrary(main, dayKey, swapIndex){
   const cats = Object.keys(EXERCISE_LIBRARY);
+  const swapping = swapIndex !== undefined && swapIndex !== null;
   let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
-    <div class="section-label" style="margin:0;">Exercise library</div>
+    <div class="section-label" style="margin:0;">${swapping ? 'Swap exercise' : 'Exercise library'}</div>
     <button id="closeLibraryBtn" style="background:none;border:none;color:var(--text-faint);font-family:var(--font-mono);font-size:11px;">Close</button>
   </div>
+  ${swapping ? `<div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">Replacing "${escapeHtml(PLAN[dayKey].exercises[swapIndex].name)}" — target and Hero flag stay as they are, just the exercise changes.</div>` : ''}
   <input type="text" id="libSearchInput" autocomplete="off" placeholder="Search exercises…" style="width:100%;background:var(--surface-2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:10px;font-size:14px;margin-bottom:14px;">
   <div id="libResults"></div>`;
   main.innerHTML = html;
@@ -2252,7 +2254,11 @@ function renderExerciseLibrary(main, dayKey){
     resultsEl.innerHTML = rhtml;
     resultsEl.querySelectorAll('.libExerciseBtn').forEach(b=>{
       b.onclick = ()=>{
-        PLAN[dayKey].exercises.push({ name: b.dataset.name, target:'', hero:false });
+        if(swapping){
+          PLAN[dayKey].exercises[swapIndex].name = b.dataset.name;
+        } else {
+          PLAN[dayKey].exercises.push({ name: b.dataset.name, target:'', hero:false });
+        }
         savePlan();
         renderProgramEditor(main);
       };
@@ -2298,12 +2304,48 @@ function parseProgramText(text){
   });
   return results;
 }
+function loadExternalScript(src){
+  return new Promise((resolve, reject)=>{
+    if(document.querySelector(`script[src="${src}"]`)){ resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = ()=>resolve();
+    s.onerror = ()=>reject(new Error('Failed to load a required library — check your connection'));
+    document.head.appendChild(s);
+  });
+}
+async function extractTextFromProgramFile(file){
+  const name = file.name.toLowerCase();
+  if(name.endsWith('.pdf')){
+    await loadExternalScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js');
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    const buf = await file.arrayBuffer();
+    const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
+    let text = '';
+    for(let i=1;i<=pdf.numPages;i++){
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      text += content.items.map(it=>it.str).join(' ') + '\n\n';
+    }
+    return text;
+  }
+  if(name.endsWith('.docx')){
+    await loadExternalScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js');
+    const buf = await file.arrayBuffer();
+    const result = await window.mammoth.extractRawText({ arrayBuffer: buf });
+    return result.value;
+  }
+  return await file.text();
+}
 function renderProgramImportForm(main){
   main.innerHTML = `
     <div class="section-label">Import program from notes</div>
     <div style="font-size:12px;color:var(--text-dim);line-height:1.5;margin-bottom:12px;">
       Paste a program from somewhere else — a coach's notes, an old template. Start each day with a title on its own line (day name helps but isn't required, e.g. "Monday — Upper" or just "Upper"), then list exercises underneath, one per line. Separate days with a blank line.
+      Stuck for content? Ask Claude in chat to write a program in exactly this format and paste the reply in below.
     </div>
+    <input type="file" id="programDocInput" accept=".pdf,.docx,.txt,.md" style="display:none;">
+    <button id="programDocBtn" class="pill" style="width:100%;padding:11px;border-style:dashed;margin-bottom:12px;">&#128196; Or upload a document (PDF / Word / text)</button>
     <textarea id="programImportTextarea" rows="12" placeholder="Monday — Upper
 Bench press 3x8-10
 Lat pulldown 3x10-12
@@ -2317,6 +2359,23 @@ Leg curl 3x10-12" style="width:100%;background:var(--surface-2);border:1px solid
     </div>
   `;
   document.getElementById('cancelProgramImportBtn').onclick = ()=>renderProgram(main);
+  document.getElementById('programDocBtn').onclick = ()=>document.getElementById('programDocInput').click();
+  document.getElementById('programDocInput').onchange = async e=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    const btn = document.getElementById('programDocBtn');
+    btn.textContent = 'Reading document…';
+    btn.disabled = true;
+    try{
+      const text = await extractTextFromProgramFile(file);
+      document.getElementById('programImportTextarea').value = text.trim();
+      showToast('Text extracted — review it below, then Parse notes');
+    }catch(err){
+      showToast(err.message || "Couldn't read that file");
+    }
+    btn.textContent = '📄 Or upload a document (PDF / Word / text)';
+    btn.disabled = false;
+  };
   document.getElementById('parseProgramImportBtn').onclick = ()=>{
     const text = document.getElementById('programImportTextarea').value;
     programImportPreview = parseProgramText(text);
@@ -2352,9 +2411,12 @@ function renderProgramImportPreview(main){
     </div>`;
   }
   const includeCount = new Set(assignedDays).size;
-  html += `<div style="display:flex;gap:10px;margin-top:4px;">
+  html += `<div class="field" style="margin-bottom:10px;"><label>Template name (only needed if saving as a template)</label>
+    <input type="text" id="importTemplateName" autocomplete="off" placeholder="e.g. Glute-focus 4-day"></div>
+  <div style="display:flex;gap:10px;margin-top:4px;flex-wrap:wrap;">
     <button id="cancelProgramImportBtn2" style="flex:1;padding:11px;border-radius:9px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);font-family:var(--font-display);font-weight:600;font-size:13px;">Cancel</button>
-    <button id="commitProgramImportBtn" style="flex:1;padding:11px;border-radius:9px;border:none;background:var(--brass);color:#0A1F1A;font-family:var(--font-display);font-weight:600;font-size:13px;">Import ${includeCount} day${includeCount!==1?'s':''}</button>
+    <button id="commitProgramImportBtn" style="flex:1;padding:11px;border-radius:9px;border:none;background:var(--brass);color:#0A1F1A;font-family:var(--font-display);font-weight:600;font-size:13px;">Apply ${includeCount} day${includeCount!==1?'s':''} now</button>
+    <button id="saveAsTemplateImportBtn" style="flex:1;padding:11px;border-radius:9px;border:1px solid var(--brass);background:none;color:var(--brass);font-family:var(--font-display);font-weight:600;font-size:13px;">Save as template instead</button>
   </div>`;
   main.innerHTML = html;
   main.querySelectorAll('.programImportDaySelect').forEach(sel=>{
@@ -2369,6 +2431,26 @@ function renderProgramImportPreview(main){
     });
     savePlan();
     showToast(`Imported ${new Set(toApply.map(b=>b.dayKey)).size} day${new Set(toApply.map(b=>b.dayKey)).size!==1?'s':''} into your program`);
+    programImportPreview = [];
+    renderProgram(main);
+  };
+  document.getElementById('saveAsTemplateImportBtn').onclick = ()=>{
+    const name = document.getElementById('importTemplateName').value.trim();
+    if(!name){ showToast('Give the template a name first'); return; }
+    const toApply = programImportPreview.filter(b=>b.dayKey);
+    if(toApply.length === 0){ showToast('Assign at least one day first'); return; }
+    const newPlan = {};
+    DAY_ORDER.forEach(k=>{
+      const blk = toApply.find(b=>b.dayKey===k);
+      if(blk){
+        newPlan[k] = { label: blk.title, type: 'lift', exercises: blk.exercises.map(e=>({ name:e.name, target:e.target, hero:false })) };
+      } else {
+        newPlan[k] = { label: 'Rest', type: 'rest', desc: '' };
+      }
+    });
+    templates.push({ id: uid(), name, createdDate: todayISO(), plan: newPlan });
+    saveTemplates();
+    showToast(`Saved "${name}" as a template — apply it from Templates whenever you want`);
     programImportPreview = [];
     renderProgram(main);
   };
@@ -2536,7 +2618,10 @@ function renderProgramEditor(main){
             <button class="heroToggleBtn" data-day="${k}" data-exidx="${i}" style="background:none;border:1px solid ${ex.hero?'var(--rust)':'var(--border)'};color:${ex.hero?'var(--rust)':'var(--text-faint)'};border-radius:6px;padding:6px 7px;font-size:10px;font-family:var(--font-mono);flex-shrink:0;">HERO</button>
             <button class="removeExEdit" data-day="${k}" data-exidx="${i}" style="background:none;border:none;color:var(--text-faint);font-size:15px;flex-shrink:0;">&times;</button>
           </div>
-          <div class="exDeloadPreview" data-day="${k}" data-exidx="${i}" style="font-size:10px;color:var(--steel);font-family:var(--font-mono);margin-top:3px;margin-left:2px;">${dl?`Deload: ${escapeHtml(dl)}`:''}</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:3px;margin-left:2px;">
+            <div class="exDeloadPreview" data-day="${k}" data-exidx="${i}" style="font-size:10px;color:var(--steel);font-family:var(--font-mono);">${dl?`Deload: ${escapeHtml(dl)}`:''}</div>
+            <button class="swapExBtn" data-day="${k}" data-exidx="${i}" style="background:none;border:none;color:var(--brass);font-family:var(--font-mono);font-size:10px;padding:0;">&#8646; Swap exercise</button>
+          </div>
         </div>`;
       });
       html += `<div style="display:flex;gap:14px;margin-top:2px;">
@@ -2600,6 +2685,11 @@ function wireProgramEditor(main){
       const day = btn.dataset.day;
       if(!PLAN[day].exercises) PLAN[day].exercises=[];
       renderExerciseLibrary(main, day);
+    };
+  });
+  main.querySelectorAll('.swapExBtn').forEach(btn=>{
+    btn.onclick = ()=>{
+      renderExerciseLibrary(main, btn.dataset.day, parseInt(btn.dataset.exidx, 10));
     };
   });
 }
